@@ -1,0 +1,114 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "A user of the application",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "User's display name"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "User's email address"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "user"],
+          "description": "User's role"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the user was created"
+        }
+      },
+      "required": ["name", "email", "role", "createdAt"]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "A construction expense",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Description of the expense"
+        },
+        "observation": {
+          "type": "string",
+          "description": "Optional observation or details"
+        },
+        "totalValue": {
+          "type": "number",
+          "description": "Total value paid"
+        },
+        "partnerValue": {
+          "type": "number",
+          "description": "Value per partner (1/3)"
+        },
+        "date": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Date of the expense"
+        },
+        "createdBy": {
+          "type": "string",
+          "description": "UID of the user who created the expense"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the expense was created"
+        }
+      },
+      "required": ["description", "totalValue", "partnerValue", "date", "createdBy", "createdAt"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "A task or reminder",
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "Task description"
+        },
+        "completed": {
+          "type": "boolean",
+          "description": "Whether the task is completed"
+        },
+        "createdBy": {
+          "type": "string",
+          "description": "UID of the user who created the task"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the task was created"
+        }
+      },
+      "required": ["text", "completed", "createdBy", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/User"
+      },
+      "description": "Users of the application"
+    },
+    "/expenses/{expenseId}": {
+      "schema": {
+        "$ref": "#/entities/Expense"
+      },
+      "description": "Construction expenses"
+    },
+    "/tasks/{taskId}": {
+      "schema": {
+        "$ref": "#/entities/Task"
+      },
+      "description": "Tasks and reminders"
+    }
+  }
+}

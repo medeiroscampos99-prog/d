@@ -1,0 +1,151 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: userId
+    // Fields:
+    //   - name: string (required, < 100 chars)
+    //   - email: string (required, valid email)
+    //   - role: string (required, 'admin' or 'user')
+    //   - createdAt: string (required, ISO 8601 date)
+    //
+    // Collection: expenses
+    // Document ID: expenseId
+    // Fields:
+    //   - description: string (required, < 200 chars)
+    //   - observation: string (optional, < 500 chars)
+    //   - totalValue: number (required, > 0)
+    //   - partnerValue: number (required, > 0)
+    //   - date: string (required, ISO 8601 date)
+    //   - createdBy: string (required, uid)
+    //   - createdAt: string (required, ISO 8601 date)
+    //
+    // Collection: tasks
+    // Document ID: taskId
+    // Fields:
+    //   - text: string (required, < 200 chars)
+    //   - completed: boolean (required)
+    //   - createdBy: string (required, uid)
+    //   - createdAt: string (required, ISO 8601 date)
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (
+          (request.auth.token.email == "medeiroscampos99@gmail.com" && request.auth.token.email_verified == true) ||
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+        );
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function uidUnchanged() {
+      return !('createdBy' in request.resource.data) ||
+        request.resource.data.createdBy == request.auth.uid;
+    }
+
+    function uidNotModified() {
+      return !('createdBy' in request.resource.data) ||
+        request.resource.data.createdBy == resource.data.createdBy;
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function validStringLength(field, minLen, maxLen) {
+      return request.resource.data[field] is string &&
+        request.resource.data[field].size() >= minLen &&
+        request.resource.data[field].size() <= maxLen;
+    }
+
+    function isValidOptionalString(field, minLen, maxLen) {
+      return !(field in request.resource.data) ||
+             (request.resource.data[field] is string &&
+              request.resource.data[field].size() >= minLen &&
+              request.resource.data[field].size() <= maxLen);
+    }
+
+    function isValidEmail(email) {
+      return email is string &&
+        email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string &&
+        dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    function isPositive(field) {
+      return request.resource.data[field] is number && request.resource.data[field] > 0;
+    }
+
+    // Domain Validators
+    function isValidUser(data) {
+      return hasOnlyAllowedFields(['name', 'email', 'role', 'createdAt']) &&
+             validStringLength('name', 1, 100) &&
+             isValidEmail(data.email) &&
+             data.role in ['admin', 'user'] &&
+             isValidDateString(data.createdAt);
+    }
+
+    function isValidExpense(data) {
+      return hasOnlyAllowedFields(['description', 'observation', 'totalValue', 'partnerValue', 'date', 'createdBy', 'createdAt']) &&
+             validStringLength('description', 1, 200) &&
+             isValidOptionalString('observation', 0, 500) &&
+             isPositive('totalValue') &&
+             isPositive('partnerValue') &&
+             isValidDateString(data.date) &&
+             data.createdBy is string && data.createdBy.size() > 0 &&
+             isValidDateString(data.createdAt);
+    }
+
+    function isValidTask(data) {
+      return hasOnlyAllowedFields(['text', 'completed', 'createdBy', 'createdAt']) &&
+             validStringLength('text', 1, 200) &&
+             data.completed is bool &&
+             data.createdBy is string && data.createdBy.size() > 0 &&
+             isValidDateString(data.createdAt);
+    }
+
+    // Rules
+    match /users/{userId} {
+      allow read: if isAdmin() || isOwner(userId);
+      allow create: if isAuthenticated() && isValidUser(request.resource.data) &&
+                    ((isOwner(userId) && request.resource.data.role == 'user') || isAdmin());
+      allow update: if isAuthenticated() && isValidUser(request.resource.data) &&
+                    ((isOwner(userId) && request.resource.data.role == resource.data.role) || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /expenses/{expenseId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidExpense(request.resource.data) && uidUnchanged();
+      allow update: if isAdmin() && isValidExpense(request.resource.data) && uidNotModified();
+      allow delete: if isAdmin();
+    }
+
+    match /tasks/{taskId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidTask(request.resource.data) && uidUnchanged();
+      allow update: if isAdmin() && isValidTask(request.resource.data) && uidNotModified();
+      allow delete: if isAdmin();
+    }
+  }
+}
