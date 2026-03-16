@@ -57,6 +57,8 @@ export default function App() {
   const [isUploadingImage, setIsUploadingImage] = useState(false);
 
   const [expenseToDelete, setExpenseToDelete] = useState<string | null>(null);
+  const [isClearModalOpen, setIsClearModalOpen] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -282,13 +284,19 @@ export default function App() {
       const jsonData = XLSX.utils.sheet_to_json(worksheet);
 
       const batch: any[] = [];
+      const normalizeKey = (key: string) => key.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
 
       jsonData.forEach((row: any) => {
-        const desc = row['Descrição'] || row['Descricao'] || row['description'] || row['Obra'] || row['Item'];
-        const obs = row['Observação'] || row['Observacao'] || row['observation'] || row['Detalhes'];
-        let total = row['Valor Total'] || row['Valor'] || row['Total'] || row['totalValue'];
-        let partner = row['Valor Sócio'] || row['Sócio'] || row['partnerValue'];
-        let date = row['Data'] || row['date'];
+        const normalizedRow: any = {};
+        Object.keys(row).forEach(k => {
+          normalizedRow[normalizeKey(k)] = row[k];
+        });
+
+        const desc = normalizedRow['descricao'] || normalizedRow['obra'] || normalizedRow['item'] || normalizedRow['nome'] || normalizedRow['gasto'] || normalizedRow['produto'];
+        const obs = normalizedRow['observacao'] || normalizedRow['detalhes'] || normalizedRow['obs'] || normalizedRow['nota'];
+        let total = normalizedRow['valor total'] || normalizedRow['valor'] || normalizedRow['total'] || normalizedRow['preco'] || normalizedRow['custo'] || normalizedRow['quantia'];
+        let partner = normalizedRow['valor socio'] || normalizedRow['socio'] || normalizedRow['parte socio'] || normalizedRow['meu valor'];
+        let date = normalizedRow['data'] || normalizedRow['dia'] || normalizedRow['data pagamento'];
 
         if (!desc || total === undefined) return;
 
@@ -327,7 +335,59 @@ export default function App() {
         alert(`${batch.length} gastos importados com sucesso!`);
         fetchData();
       } else {
-        alert("Nenhum gasto válido encontrado na planilha. Verifique se as colunas têm nomes como 'Descrição' e 'Valor Total'.");
+        // Fallback to Gemini if no valid rows found
+        try {
+          alert("Colunas não reconhecidas. Tentando ler a planilha com Inteligência Artificial...");
+          const csvData = XLSX.utils.sheet_to_csv(worksheet);
+          
+          const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+          const response = await ai.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: `Extract the expenses from this CSV data. Return a JSON array of expenses. If the date is missing, use the current date. CRITICAL: The values are in Brazilian Reais (BRL). Pay close attention to the Brazilian currency format where a dot is used for thousands and a comma is used for decimals (e.g., '1.234,56' means 1234.56). You MUST return the numbers as standard floats (e.g., 1234.56). Remove any 'R$' symbols.\n\nCSV Data:\n${csvData.substring(0, 5000)}`,
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    description: { type: Type.STRING, description: "Expense description or item name" },
+                    observation: { type: Type.STRING, description: "Additional details or observation" },
+                    total_value: { type: Type.NUMBER, description: "Total value/cost" },
+                    partner_value: { type: Type.NUMBER, description: "Partner value, usually 1/3 of total" },
+                    date: { type: Type.STRING, description: "Date of expense in ISO format" }
+                  },
+                  required: ["description", "total_value"]
+                }
+              }
+            }
+          });
+
+          const jsonStr = response.text?.trim();
+          if (jsonStr) {
+            const expenses = JSON.parse(jsonStr);
+            const aiBatch = expenses.map((exp: any) => ({
+              description: String(exp.description).toUpperCase(),
+              observation: exp.observation ? String(exp.observation) : '',
+              total_value: Number(exp.total_value),
+              partner_value: exp.partner_value ? Number(exp.partner_value) : Number(exp.total_value) / 3,
+              date: exp.date || new Date().toISOString(),
+              created_by: user.id
+            }));
+
+            if (aiBatch.length > 0) {
+              const { error } = await supabase.from('expenses').insert(aiBatch);
+              if (error) throw error;
+              alert(`${aiBatch.length} gastos importados com sucesso usando IA!`);
+              fetchData();
+            } else {
+              alert("Não foi possível identificar gastos na planilha. Verifique o formato.");
+            }
+          }
+        } catch (aiErr) {
+          console.error("AI Fallback error:", aiErr);
+          alert("Nenhum gasto válido encontrado na planilha. Baixe o modelo para ver o formato correto.");
+        }
       }
     } catch (error) {
       console.error("Error parsing file:", error);
@@ -335,6 +395,34 @@ export default function App() {
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const clearDashboard = async () => {
+    if (!user) return;
+    setIsClearing(true);
+    try {
+      const { error } = await supabase
+        .from('expenses')
+        .delete()
+        .eq('created_by', user.id);
+        
+      if (error) throw error;
+      
+      const { error: tasksError } = await supabase
+        .from('tasks')
+        .delete()
+        .eq('created_by', user.id);
+        
+      if (tasksError) throw tasksError;
+
+      setExpenses([]);
+      setTasks([]);
+      setIsClearModalOpen(false);
+    } catch (error) {
+      console.error('Error clearing dashboard:', error);
+    } finally {
+      setIsClearing(false);
     }
   };
 
@@ -362,7 +450,7 @@ export default function App() {
                   },
                 },
                 {
-                  text: "Extract the expenses from this spreadsheet or receipt image. Return a JSON array of expenses. If the date is missing, use the current date. Ensure numbers are properly parsed.",
+                  text: "Extract the expenses from this spreadsheet or receipt image. Return a JSON array of expenses. If the date is missing, use the current date. CRITICAL: The values are in Brazilian Reais (BRL). Pay close attention to the Brazilian currency format where a dot is used for thousands and a comma is used for decimals (e.g., '1.234,56' means 1234.56). You MUST return the numbers as standard floats (e.g., 1234.56). Remove any 'R$' symbols.",
                 },
               ],
             },
@@ -618,6 +706,13 @@ export default function App() {
               <p className="text-xs text-zinc-500">{user.email}</p>
             </div>
             <button
+              onClick={() => setIsClearModalOpen(true)}
+              className="p-2 text-red-500 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors cursor-pointer"
+              title="Zerar Painel"
+            >
+              <Trash2 className="w-5 h-5" />
+            </button>
+            <button
               onClick={logout}
               className="p-2 text-zinc-400 hover:text-zinc-900 hover:bg-zinc-100 rounded-xl transition-colors cursor-pointer"
               title="Sair"
@@ -667,7 +762,7 @@ export default function App() {
                   Registrar Novo Gasto
                 </h2>
                 
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <input 
                     type="file" 
                     accept="image/*" 
@@ -1025,6 +1120,32 @@ export default function App() {
                 className="flex-1 px-4 py-3 rounded-xl font-semibold text-white bg-red-600 hover:bg-red-700 transition-colors"
               >
                 Excluir
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Clear Dashboard Confirmation Modal */}
+      {isClearModalOpen && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-xl">
+            <h3 className="text-xl font-bold text-red-600 mb-2">Zerar Painel</h3>
+            <p className="text-zinc-500 mb-6">Tem certeza que deseja excluir <strong>TODOS</strong> os gastos e tarefas? Esta ação não pode ser desfeita e você perderá todos os dados.</p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setIsClearModalOpen(false)}
+                disabled={isClearing}
+                className="flex-1 px-4 py-3 rounded-xl font-semibold text-zinc-700 bg-zinc-100 hover:bg-zinc-200 transition-colors disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={clearDashboard}
+                disabled={isClearing}
+                className="flex-1 px-4 py-3 rounded-xl font-semibold text-white bg-red-600 hover:bg-red-700 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isClearing ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Zerar Tudo'}
               </button>
             </div>
           </div>
