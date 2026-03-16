@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Plus, Trash2, DollarSign, Calculator, HardHat, Receipt, Search, ListTodo, Edit2, X, Check, LogIn, LogOut, Loader2, Upload, Mail, Lock } from 'lucide-react';
+import { Plus, Trash2, DollarSign, Calculator, HardHat, Receipt, Search, ListTodo, Edit2, X, Check, LogIn, LogOut, Loader2, Upload, Mail, Lock, Camera } from 'lucide-react';
 import { supabase } from './supabase';
 import { User } from '@supabase/supabase-js';
 import * as XLSX from 'xlsx';
+import { GoogleGenAI, Type } from '@google/genai';
 
 interface Expense {
   id: string;
@@ -51,6 +52,11 @@ export default function App() {
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
+
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
+
+  const [expenseToDelete, setExpenseToDelete] = useState<string | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -247,16 +253,20 @@ export default function App() {
     }
   };
 
-  const handleDeleteExpense = async (id: string) => {
-    if (window.confirm('Tem certeza que deseja excluir este gasto?')) {
-      try {
-        const { error } = await supabase.from('expenses').delete().eq('id', id);
-        if (error) throw error;
-        fetchData();
-      } catch (error) {
-        console.error("Error deleting expense:", error);
-        alert("Erro ao excluir gasto.");
-      }
+  const handleDeleteExpense = (id: string) => {
+    setExpenseToDelete(id);
+  };
+
+  const confirmDeleteExpense = async () => {
+    if (!expenseToDelete) return;
+    try {
+      const { error } = await supabase.from('expenses').delete().eq('id', expenseToDelete);
+      if (error) throw error;
+      fetchData();
+      setExpenseToDelete(null);
+    } catch (error) {
+      console.error("Error deleting expense:", error);
+      alert("Erro ao excluir gasto.");
     }
   };
 
@@ -325,6 +335,91 @@ export default function App() {
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !user) return;
+
+    setIsUploadingImage(true);
+    try {
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        try {
+          const base64Data = (reader.result as string).split(',')[1];
+          const mimeType = file.type;
+
+          const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+          const response = await ai.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: {
+              parts: [
+                {
+                  inlineData: {
+                    data: base64Data,
+                    mimeType: mimeType,
+                  },
+                },
+                {
+                  text: "Extract the expenses from this spreadsheet or receipt image. Return a JSON array of expenses. If the date is missing, use the current date. Ensure numbers are properly parsed.",
+                },
+              ],
+            },
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    description: { type: Type.STRING, description: "Expense description or item name" },
+                    observation: { type: Type.STRING, description: "Additional details or observation" },
+                    total_value: { type: Type.NUMBER, description: "Total value/cost" },
+                    partner_value: { type: Type.NUMBER, description: "Partner value, usually 1/3 of total" },
+                    date: { type: Type.STRING, description: "Date of expense in ISO format" }
+                  },
+                  required: ["description", "total_value"]
+                }
+              }
+            }
+          });
+
+          const jsonStr = response.text?.trim();
+          if (jsonStr) {
+            const expenses = JSON.parse(jsonStr);
+            const batch = expenses.map((exp: any) => ({
+              description: String(exp.description).toUpperCase(),
+              observation: exp.observation ? String(exp.observation) : '',
+              total_value: Number(exp.total_value),
+              partner_value: exp.partner_value ? Number(exp.partner_value) : Number(exp.total_value) / 3,
+              date: exp.date || new Date().toISOString(),
+              created_by: user.id
+            }));
+
+            if (batch.length > 0) {
+              const { error } = await supabase.from('expenses').insert(batch);
+              if (error) throw error;
+              alert(`${batch.length} gastos importados com sucesso da imagem!`);
+              fetchData();
+            } else {
+              alert("Nenhum gasto encontrado na imagem.");
+            }
+          }
+        } catch (err) {
+          console.error("Error processing image with Gemini:", err);
+          alert("Erro ao processar a imagem com Inteligência Artificial.");
+        } finally {
+          setIsUploadingImage(false);
+          if (imageInputRef.current) imageInputRef.current.value = '';
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (error) {
+      console.error("Error reading file:", error);
+      alert("Erro ao ler a imagem.");
+      setIsUploadingImage(false);
+      if (imageInputRef.current) imageInputRef.current.value = '';
     }
   };
 
@@ -572,7 +667,24 @@ export default function App() {
                   Registrar Novo Gasto
                 </h2>
                 
-                <div>
+                <div className="flex gap-2">
+                  <input 
+                    type="file" 
+                    accept="image/*" 
+                    className="hidden" 
+                    ref={imageInputRef}
+                    onChange={handleImageUpload}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => imageInputRef.current?.click()}
+                    disabled={isUploadingImage}
+                    className="bg-zinc-100 hover:bg-zinc-200 text-zinc-700 px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 transition-colors disabled:opacity-50 cursor-pointer"
+                  >
+                    {isUploadingImage ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
+                    <span className="hidden sm:inline">Ler Imagem</span>
+                  </button>
+
                   <input 
                     type="file" 
                     accept=".xlsx, .xls, .csv" 
@@ -587,7 +699,7 @@ export default function App() {
                     className="bg-zinc-100 hover:bg-zinc-200 text-zinc-700 px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 transition-colors disabled:opacity-50 cursor-pointer"
                   >
                     {isUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
-                    Importar Planilha
+                    <span className="hidden sm:inline">Importar Planilha</span>
                   </button>
                 </div>
               </div>
@@ -892,6 +1004,29 @@ export default function App() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {/* Delete Confirmation Modal */}
+      {expenseToDelete && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-xl">
+            <h3 className="text-xl font-bold text-zinc-900 mb-2">Excluir Gasto</h3>
+            <p className="text-zinc-500 mb-6">Tem certeza que deseja excluir este gasto? Esta ação não pode ser desfeita.</p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setExpenseToDelete(null)}
+                className="flex-1 px-4 py-3 rounded-xl font-semibold text-zinc-700 bg-zinc-100 hover:bg-zinc-200 transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={confirmDeleteExpense}
+                className="flex-1 px-4 py-3 rounded-xl font-semibold text-white bg-red-600 hover:bg-red-700 transition-colors"
+              >
+                Excluir
+              </button>
+            </div>
           </div>
         </div>
       )}
